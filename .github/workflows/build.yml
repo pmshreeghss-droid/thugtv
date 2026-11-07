@@ -4,13 +4,448 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: 8.7 }
-      - run: gradle assembleDebug
+      - name: Create project files
+        run: |
+          mkdir -p proj
+          cat > proj/settings.gradle <<'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ThugTV"
+          include ':app'
+          EOF_FILE
+          mkdir -p proj
+          cat > proj/build.gradle <<'EOF_FILE'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF_FILE
+          mkdir -p proj
+          cat > proj/gradle.properties <<'EOF_FILE'
+          android.useAndroidX=true
+          EOF_FILE
+          mkdir -p proj/app
+          cat > proj/app/build.gradle <<'EOF_FILE'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'online.thugtv.tv'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'online.thugtv.tv'
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 2
+                  versionName '1.1'
+              }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          dependencies {
+              implementation 'androidx.media3:media3-exoplayer:1.3.1'
+              implementation 'androidx.media3:media3-exoplayer-hls:1.3.1'
+              implementation 'androidx.media3:media3-exoplayer-dash:1.3.1'
+              implementation 'androidx.media3:media3-ui:1.3.1'
+          }
+          EOF_FILE
+          mkdir -p proj/app/src/main
+          cat > proj/app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <application
+                  android:label="@string/app_name"
+                  android:icon="@drawable/banner"
+                  android:banner="@drawable/banner"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <activity
+                      android:name=".PlayerActivity"
+                      android:exported="false"
+                      android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation" />
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p proj/app/src/main/res/values
+          cat > proj/app/src/main/res/values/strings.xml <<'EOF_FILE'
+          <resources><string name="app_name">ThugTV</string></resources>
+          EOF_FILE
+          mkdir -p proj/app/src/main/res/drawable
+          cat > proj/app/src/main/res/drawable/banner.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#111111" />
+          </shape>
+          EOF_FILE
+          mkdir -p proj/app/src/main/java/online/thugtv/tv
+          cat > proj/app/src/main/java/online/thugtv/tv/MainActivity.java <<'EOF_FILE'
+          package online.thugtv.tv;
+ 
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.view.Gravity;
+          import android.view.KeyEvent;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.FrameLayout;
+          import android.widget.TextView;
+ 
+          import java.util.regex.Pattern;
+ 
+          public class MainActivity extends Activity {
+              private static final String URL = "https://thugtv.online";
+              private static final Pattern VIDEO =
+                      Pattern.compile(".*\\.(m3u8|mp4|mkv|webm|mpd|mov|avi)(\\?.*)?$", Pattern.CASE_INSENSITIVE);
+ 
+              private FrameLayout root;
+              private WebView web;
+              private CursorView cursor;
+              private TextView playBtn;
+              private View customView;
+              private WebChromeClient.CustomViewCallback customCb;
+ 
+              private boolean cursorOn = true;
+              private float cx = -1, cy = -1;
+              private float density;
+              private long downTime;
+              private volatile String pageUrl = URL;
+              private volatile String sniffedUrl;
+ 
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  density = getResources().getDisplayMetrics().density;
+ 
+                  root = new FrameLayout(this);
+                  web = new WebView(this);
+                  root.addView(web, new FrameLayout.LayoutParams(-1, -1));
+ 
+                  cursor = new CursorView(this);
+                  root.addView(cursor, new FrameLayout.LayoutParams(-1, -1));
+ 
+                  playBtn = new TextView(this);
+                  playBtn.setText("\u25B6  Play in player");
+                  playBtn.setTextColor(Color.WHITE);
+                  playBtn.setTextSize(18);
+                  playBtn.setBackgroundColor(0xE6C62828);
+                  int p = (int) (14 * density);
+                  playBtn.setPadding(p * 2, p, p * 2, p);
+                  playBtn.setVisibility(View.GONE);
+                  playBtn.setOnClickListener(v -> openNativePlayer(sniffedUrl));
+                  FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+                  lp.setMargins(0, p * 2, p * 2, 0);
+                  root.addView(playBtn, lp);
+ 
+                  setContentView(root);
+ 
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+ 
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                          return handleLink(r.getUrl().toString());
+                      }
+                      @Override public boolean shouldOverrideUrlLoading(WebView v, String url) {
+                          return handleLink(url);
+                      }
+                      @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
+                          pageUrl = url;
+                          sniffedUrl = null;
+                          playBtn.setVisibility(View.GONE);
+                      }
+                      @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                          String u = r.getUrl().toString();
+                          if (VIDEO.matcher(u).matches() && !u.equals(sniffedUrl)) {
+                              sniffedUrl = u;
+                              runOnUiThread(() -> playBtn.setVisibility(View.VISIBLE));
+                          }
+                          return null;
+                      }
+                  });
+                  web.setDownloadListener((url, ua, cd, mime, len) -> {
+                      if (mime != null && (mime.startsWith("video/") || mime.contains("mpegurl"))) {
+                          openNativePlayer(url);
+                      }
+                  });
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override public void onShowCustomView(View v, CustomViewCallback cb) {
+                          customView = v; customCb = cb;
+                          root.addView(v, new FrameLayout.LayoutParams(-1, -1));
+                          cursor.bringToFront();
+                          playBtn.bringToFront();
+                      }
+                      @Override public void onHideCustomView() {
+                          if (customView != null) {
+                              root.removeView(customView);
+                              customView = null;
+                              if (customCb != null) customCb.onCustomViewHidden();
+                          }
+                      }
+                  });
+                  web.loadUrl(URL);
+              }
+ 
+              private boolean handleLink(String url) {
+                  if (VIDEO.matcher(url).matches()) { openNativePlayer(url); return true; }
+                  return false;
+              }
+ 
+              private void openNativePlayer(String url) {
+                  if (url == null) return;
+                  Intent i = new Intent(this, PlayerActivity.class);
+                  i.putExtra("url", url);
+                  i.putExtra("referer", pageUrl);
+                  i.putExtra("ua", web.getSettings().getUserAgentString());
+                  startActivity(i);
+              }
+ 
+              private void ensureCursor() {
+                  if (cx < 0 && root.getWidth() > 0) {
+                      cx = root.getWidth() / 2f;
+                      cy = root.getHeight() / 2f;
+                      cursor.setPos(cx, cy);
+                  }
+              }
+ 
+              private void setCursorMode(boolean on) {
+                  cursorOn = on;
+                  cursor.setVisibility(on ? View.VISIBLE : View.GONE);
+              }
+ 
+              @Override
+              public boolean dispatchKeyEvent(KeyEvent e) {
+                  int k = e.getKeyCode();
+                  boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
+ 
+                  // Menu / Red / * : toggle cursor <-> normal D-pad focus mode
+                  if (k == KeyEvent.KEYCODE_MENU || k == KeyEvent.KEYCODE_PROG_RED || k == KeyEvent.KEYCODE_STAR) {
+                      if (down && e.getRepeatCount() == 0) setCursorMode(!cursorOn);
+                      return true;
+                  }
+                  // Play / Yellow : open detected video in the native player
+                  if ((k == KeyEvent.KEYCODE_MEDIA_PLAY || k == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                          || k == KeyEvent.KEYCODE_PROG_YELLOW) && sniffedUrl != null) {
+                      if (down && e.getRepeatCount() == 0) openNativePlayer(sniffedUrl);
+                      return true;
+                  }
+                  if (!cursorOn || k == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(e);
+ 
+                  ensureCursor();
+                  int w = root.getWidth(), h = root.getHeight();
+                  View target = customView != null ? customView : web;
+ 
+                  switch (k) {
+                      case KeyEvent.KEYCODE_DPAD_LEFT:
+                      case KeyEvent.KEYCODE_DPAD_RIGHT:
+                      case KeyEvent.KEYCODE_DPAD_UP:
+                      case KeyEvent.KEYCODE_DPAD_DOWN: {
+                          if (!down) return true;
+                          float step = density * (8 + Math.min(e.getRepeatCount(), 30) * 1.4f);
+                          if (k == KeyEvent.KEYCODE_DPAD_LEFT) cx = Math.max(0, cx - step);
+                          if (k == KeyEvent.KEYCODE_DPAD_RIGHT) cx = Math.min(w - 1, cx + step);
+                          if (k == KeyEvent.KEYCODE_DPAD_UP) {
+                              if (cy - step < 0 && customView == null) web.scrollBy(0, (int) -(step * 3));
+                              cy = Math.max(0, cy - step);
+                          }
+                          if (k == KeyEvent.KEYCODE_DPAD_DOWN) {
+                              if (cy + step > h - 1 && customView == null) web.scrollBy(0, (int) (step * 3));
+                              cy = Math.min(h - 1, cy + step);
+                          }
+                          cursor.setPos(cx, cy);
+                          return true;
+                      }
+                      case KeyEvent.KEYCODE_DPAD_CENTER:
+                      case KeyEvent.KEYCODE_ENTER:
+                      case KeyEvent.KEYCODE_NUMPAD_ENTER: {
+                          if (down && e.getRepeatCount() == 0) {
+                              if (hitPlayButton()) { playBtn.performClick(); return true; }
+                              downTime = SystemClock.uptimeMillis();
+                              sendTouch(target, MotionEvent.ACTION_DOWN);
+                          } else if (!down) {
+                              sendTouch(target, MotionEvent.ACTION_UP);
+                          }
+                          return true;
+                      }
+                  }
+                  return super.dispatchKeyEvent(e);
+              }
+ 
+              private boolean hitPlayButton() {
+                  if (playBtn.getVisibility() != View.VISIBLE) return false;
+                  return cx >= playBtn.getLeft() && cx <= playBtn.getRight()
+                          && cy >= playBtn.getTop() && cy <= playBtn.getBottom();
+              }
+ 
+              private void sendTouch(View target, int action) {
+                  if (action == MotionEvent.ACTION_UP && downTime == 0) return;
+                  MotionEvent m = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, cx, cy, 0);
+                  m.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
+                  target.dispatchTouchEvent(m);
+                  m.recycle();
+                  if (action == MotionEvent.ACTION_UP) downTime = 0;
+              }
+ 
+              @Override
+              public void onBackPressed() {
+                  if (customView != null) { web.getWebChromeClient().onHideCustomView(); return; }
+                  if (web.canGoBack()) { web.goBack(); return; }
+                  super.onBackPressed();
+              }
+          }
+          EOF_FILE
+          mkdir -p proj/app/src/main/java/online/thugtv/tv
+          cat > proj/app/src/main/java/online/thugtv/tv/PlayerActivity.java <<'EOF_FILE'
+          package online.thugtv.tv;
+ 
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.view.KeyEvent;
+          import android.widget.Toast;
+ 
+          import androidx.media3.common.MediaItem;
+          import androidx.media3.common.PlaybackException;
+          import androidx.media3.common.Player;
+          import androidx.media3.datasource.DefaultHttpDataSource;
+          import androidx.media3.exoplayer.ExoPlayer;
+          import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+          import androidx.media3.ui.PlayerView;
+ 
+          import java.util.HashMap;
+          import java.util.Map;
+ 
+          /** Native fullscreen player (ExoPlayer / Media3) for direct video and HLS/DASH links. */
+          public class PlayerActivity extends Activity {
+              private ExoPlayer player;
+              private PlayerView view;
+ 
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  view = new PlayerView(this);
+                  view.setKeepScreenOn(true);
+                  setContentView(view);
+ 
+                  String url = getIntent().getStringExtra("url");
+                  String referer = getIntent().getStringExtra("referer");
+                  String ua = getIntent().getStringExtra("ua");
+                  if (url == null) { finish(); return; }
+ 
+                  DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+                          .setAllowCrossProtocolRedirects(true);
+                  if (ua != null) http.setUserAgent(ua);
+                  if (referer != null) {
+                      Map<String, String> h = new HashMap<>();
+                      h.put("Referer", referer);
+                      http.setDefaultRequestProperties(h);
+                  }
+ 
+                  player = new ExoPlayer.Builder(this)
+                          .setMediaSourceFactory(new DefaultMediaSourceFactory(http))
+                          .build();
+                  player.addListener(new Player.Listener() {
+                      @Override public void onPlayerError(PlaybackException e) {
+                          Toast.makeText(PlayerActivity.this,
+                                  "Can't play this video: " + e.getErrorCodeName(), Toast.LENGTH_LONG).show();
+                      }
+                  });
+                  view.setPlayer(player);
+                  player.setMediaItem(MediaItem.fromUri(url));
+                  player.prepare();
+                  player.setPlayWhenReady(true);
+              }
+ 
+              @Override
+              public boolean dispatchKeyEvent(KeyEvent e) {
+                  // With the controls hidden: left/right = seek 10s, OK = pause/play.
+                  if (player != null && !view.isControllerFullyVisible() && e.getAction() == KeyEvent.ACTION_DOWN) {
+                      switch (e.getKeyCode()) {
+                          case KeyEvent.KEYCODE_DPAD_LEFT:
+                              player.seekTo(Math.max(0, player.getCurrentPosition() - 10000)); return true;
+                          case KeyEvent.KEYCODE_DPAD_RIGHT:
+                              player.seekTo(player.getCurrentPosition() + 10000); return true;
+                          case KeyEvent.KEYCODE_DPAD_CENTER:
+                          case KeyEvent.KEYCODE_ENTER:
+                              player.setPlayWhenReady(!player.getPlayWhenReady()); return true;
+                          case KeyEvent.KEYCODE_DPAD_UP:
+                          case KeyEvent.KEYCODE_DPAD_DOWN:
+                              view.showController(); return true;
+                      }
+                  }
+                  return super.dispatchKeyEvent(e);
+              }
+ 
+              @Override protected void onStop() { super.onStop(); if (player != null) player.pause(); }
+ 
+              @Override protected void onDestroy() {
+                  super.onDestroy();
+                  if (player != null) { player.release(); player = null; }
+              }
+          }
+          EOF_FILE
+          mkdir -p proj/app/src/main/java/online/thugtv/tv
+          cat > proj/app/src/main/java/online/thugtv/tv/CursorView.java <<'EOF_FILE'
+          package online.thugtv.tv;
+ 
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.view.View;
+ 
+          /** Round on-screen pointer drawn above the WebView. */
+          public class CursorView extends View {
+              private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final float r;
+              private float x, y;
+ 
+              public CursorView(Context c) {
+                  super(c);
+                  float d = c.getResources().getDisplayMetrics().density;
+                  r = 9 * d;
+                  fill.setColor(0xCCFFFFFF);
+                  stroke.setColor(0xFF000000);
+                  stroke.setStyle(Paint.Style.STROKE);
+                  stroke.setStrokeWidth(2 * d);
+                  setFocusable(false);
+              }
+ 
+              public void setPos(float nx, float ny) { x = nx; y = ny; invalidate(); }
+ 
+              @Override protected void onDraw(Canvas c) {
+                  c.drawCircle(x, y, r, fill);
+                  c.drawCircle(x, y, r, stroke);
+              }
+          }
+          EOF_FILE
+      - name: Build
+        run: gradle -p proj assembleDebug
+      - name: Check app exists
+        run: ls -l proj/app/build/outputs/apk/debug/
       - uses: actions/upload-artifact@v4
         with:
           name: ThugTV-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
